@@ -1,0 +1,108 @@
+from datetime import datetime, timedelta
+import pandas as pd
+from io import StringIO
+import requests
+from airflow.decorators import dag, task
+from airflow.operators.python import get_current_context
+import pandas as pd
+import pandahouse as ph
+import numpy as np
+
+connection = {'host': 'https://clickhouse.lab.karpov.courses',
+                      'database':'simulator_20221120',
+                      'user':'student', 
+                      'password':'dpo_python_2020'
+                     }
+connection_test = {'host': 'https://clickhouse.lab.karpov.courses',
+                      'database':'simulator_20221120',
+                      'user':'student-rw', 
+                      'password':'656e2b0c9c'
+                     }
+default_args = {
+    'owner': 'd-merinov-24',
+    'depends_on_past': False,
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2022, 12, 13),
+    'schedule_interval': '0 12 * * *'
+    }
+
+
+# @dag(default_args=default_args, schedule_interval=schedule_interval, catchup=False)
+# def dag_merinov_etl():
+
+
+def get_feed():
+    query = '''
+                SELECT user_id as users,
+                       toDate(time) as event_date,
+                       countIf(action = 'like') as likes,
+                       countIf(action = 'view') as views,
+                       os, gender, age
+                FROM simulator_20221120.feed_actions 
+                WHERE toDate(time) = today() - 1
+                GROUP BY users, os, gender, age, event_date
+            '''
+    df_feed = ph.read_clickhouse(query=query, connection=connection)
+    return df_feed
+    
+def get_messages():
+        query = '''
+                    with table1 as 
+                        (SELECT user_id as users,
+                               toDate(time) as event_date,
+                               count(1) as sent_messages,
+                               count(DISTINCT reciever_id) as num_recievers,
+                               os, gender, age
+                        FROM simulator_20221120.message_actions
+                        WHERE toDate(time) = today() - 1
+                        GROUP BY users, os, gender, age, event_date
+                        )
+
+                    SELECT l.*, recieved_messages, num_senders FROM table1 as l
+                    LEFT JOIN 
+                      (
+                          SELECT reciever_id as users,
+                                 toDate(time) as event_date,
+                                 count(1) as recieved_messages, 
+                                 count(DISTINCT user_id) as num_senders
+                          FROM simulator_20221120.message_actions 
+                          WHERE toDate(time) = today() - 1
+                          GROUP BY users, event_date
+                      ) as r ON l.users = r.users and l.event_date = r.event_date
+            '''
+        df_mess = ph.read_clickhouse(query=query, connection=connection)
+        return df_mess
+
+def merge_df(df_feed, df_mess):
+    df_all = df_feed.merge(df_mess,
+                               left_on=['users', 'event_date', 'os', 'gender', 'age'],
+                               right_on=['users', 'event_date', 'os', 'gender', 'age'],
+                               how='outer')
+    return df_all
+
+def df_gender(df_all):
+    df_gender = df_all[['gender', 'event_date', 'sent_messages', 'num_recievers',
+                                  'recieved_messages', 'num_senders', 'views', 'likes']].groupby(['gender','event_date'])\
+                                                        .sum().reset_index()\
+                                                        .assign(demension = 'gender')\
+                                                        .rename(columns={'gender':'dimension_value'})
+    return df_gender
+
+
+def df_age(df_all):
+    df_age = df_all[['age', 'event_date', 'sent_messages', 'num_recievers',
+                                  'recieved_messages', 'num_senders', 'views', 'likes']].groupby(['age','event_date'])\
+                                                        .sum().reset_index()\
+                                                        .assign(demension = 'age')\
+                                                        .rename(columns={'age':'dimension_value'})
+    return df_age
+
+
+def df_os(df_all):
+    df_os = df_all[['os', 'event_date', 'sent_messages', 'num_recievers',
+                                  'recieved_messages', 'num_senders', 'views', 'likes']].groupby(['os', 'event_date'])\
+                                                        .sum().reset_index()\
+                                                        .assign(demension = 'os')\
+                                                        .rename(columns={'os':'dimension_value'})
+    return df_os
